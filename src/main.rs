@@ -1,0 +1,442 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use serde::{Deserialize, Serialize};
+use vkclient::{List, Version, VkApi, VkApiResult};
+use vkclient::longpoll::LongPollRequest;
+use futures_util::StreamExt;
+use serde_json::{json, Value};
+use teloxide::adaptors::DefaultParseMode;
+use teloxide::Bot;
+use teloxide::prelude::*;
+use teloxide::types::{InputFile, InputMedia, InputMediaAudio, InputMediaPhoto, InputMediaVideo, LinkPreviewOptions, MessageId, ParseMode, Recipient, ReplyParameters};
+use url::Url;
+
+#[derive(Serialize)]
+struct MessagesLongPoll {
+    lp_version: u8,
+}
+
+#[derive(Deserialize)]
+struct LongPollResponse {
+    key: String,
+    server: String,
+    ts: u64,
+}
+
+enum MessageType {
+    Text(MessageId),
+    Caption(MessageId)
+}
+
+#[derive(Clone)]
+struct State {
+    api: VkApi,
+    bot: DefaultParseMode<Bot>,
+    chat_map: HashMap<u64, Recipient>,
+    msg_map: Arc<Mutex<HashMap<u64, MessageType>>>,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let vk_token = std::env::var("VK_TOKEN").expect("pass VK_TOKEN as env variable");
+    let tg_token = std::env::var("BOT_TOKEN").expect("pass BOT_TOKEN as env variable");
+    let mut chat_map: HashMap<u64, Recipient> = serde_json::from_str(&std::fs::read_to_string("chats.json")?)?;
+    println!("{:#?}", chat_map);
+
+    let client: VkApi = vkclient::VkApiBuilder::new(vk_token.to_string()).with_version(Version(5, 199)).into();
+
+    let bot = Bot::new(tg_token).parse_mode(ParseMode::MarkdownV2);
+
+    let LongPollResponse { key, server, ts } = client.send_request("messages.getLongPollServer", MessagesLongPoll {
+        lp_version: 3
+    }).await?;
+
+    let stream = client.longpoll().subscribe::<_, Value>(LongPollRequest {
+        server,
+        key,
+        ts: ts.to_string(),
+        wait: 25,
+        additional_params: json!({"mode": 2, "version": 3}),
+    });
+
+    let msg_map = HashMap::<u64, MessageType>::new();
+
+    let state = State {
+        api: client,
+        bot,
+        chat_map,
+        msg_map: Arc::new(Mutex::new(msg_map)),
+    };
+
+    stream
+        .for_each(move |r| {
+            let state = state.clone();
+            async move {
+                if let Ok(v) = r {
+                    handle_msg(&state, v).await;
+                }
+            }
+        }).await;
+
+    Ok(())
+}
+
+async fn handle_msg(state: &State, msg: Value) {
+    match msg.get(0).and_then(|v| v.as_i64()) {
+        Some(4) => new_message(state, msg).await,
+        Some(5) => edit_message(state, msg).await,
+        _ => {}
+    }
+}
+
+async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (String, Vec<Attachment>) {
+    let from = get_sender(&state.api, from).await.unwrap_or("???".to_string());
+    let (attachments, attach) = handle_attach(state, id).await;
+    let text = text
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+        .replace("~", "\\~")
+        .replace("`", "\\`")
+        .replace(">", "\\>")
+        .replace("#", "\\#")
+        .replace("+", "\\+")
+        .replace("-", "\\-")
+        .replace("=", "\\=")
+        .replace("|", "\\|")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+        .replace(".", "\\.")
+        .replace("!", "\\!");
+    let msg = format!("*{}*\n{}{}\n{}", from, text, if text.len() == 0 { "" } else { "\n" }, attach);
+
+    return (msg, attachments);
+}
+
+async fn new_message(state: &State, msg: Value) {
+    let id = msg.get(1).unwrap().as_u64().unwrap();
+    let chat_id = msg.get(3).unwrap().as_u64().unwrap();
+    if chat_id < 2000000000 {
+        return;
+    }
+    let text = msg.get(5).unwrap().as_str().unwrap();
+    let from = msg.get(6).unwrap().get("from").unwrap().as_str().unwrap();
+
+    if let Some(chat) = state.chat_map.get(&chat_id) {
+        println!("new message #{} to chat {} from {}", id, chat_id, from);
+        let reply = if let Some(reply) = msg.get(7).unwrap().get("reply") {
+            let reply: Value = serde_json::from_str(reply.as_str().unwrap()).unwrap();
+            let mid = reply.get("conversation_message_id").unwrap().as_u64().unwrap();
+
+            let resp: GetMessageResponse = state.api.send_request("messages.getByConversationMessageId", GetMessageByConvIdRequest {
+                conversation_message_ids: List(vec![mid]),
+                peer_id: chat_id
+            }).await.unwrap();
+            let msg: VkMessage = resp.items.into_iter().nth(0).unwrap();
+
+            if let Some(MessageType::Caption(id) | MessageType::Text(id)) = state.msg_map.lock().unwrap().get(&msg.id) {
+                Some(ReplyParameters {
+                    message_id: id.clone(),
+                    chat_id: None,
+                    allow_sending_without_reply: None,
+                    quote: None,
+                    quote_parse_mode: None,
+                    quote_entities: None,
+                    quote_position: None,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let (msg, attachments) = format_message(state, id, from, text).await;
+
+        let mut media = vec![];
+        for (i, attach) in attachments.into_iter().enumerate() {
+            match attach {
+                Attachment::Photo { file } => {
+                    let mut photo = InputMediaPhoto::new(file);
+                    if i == 0 {
+                        photo = photo.caption(msg.clone());
+                    }
+                    media.push(InputMedia::Photo(photo));
+                }
+                Attachment::Voice { file } => {
+                    let mut voice = InputMediaAudio::new(file);
+                    if i == 0 {
+                        voice = voice.caption(msg.clone());
+                    }
+                    media.push(InputMedia::Audio(voice));
+                }
+                Attachment::Video { file} => {
+                    let mut video = InputMediaVideo::new(file);
+                    if i == 0 {
+                        video = video.caption(msg.clone());
+                    }
+                    media.push(InputMedia::Video(video));
+                }
+            }
+        }
+
+        if media.len() > 0 {
+            let mut msg = state.bot.send_media_group(chat.clone(), media);
+            if let Some(reply) = reply {
+                msg = msg.reply_parameters(reply);
+            }
+            let msg = msg.await.unwrap().into_iter().nth(0).unwrap();
+            state.msg_map.lock().unwrap().insert(id, MessageType::Caption(msg.id));
+        } else {
+            let mut msg = state.bot.send_message(chat.clone(), msg)
+                .link_preview_options(LinkPreviewOptions {
+                    is_disabled: true,
+                    url: None,
+                    prefer_small_media: false,
+                    prefer_large_media: false,
+                    show_above_text: false,
+                });
+            if let Some(reply) = reply {
+                msg = msg.reply_parameters(reply);
+            }
+            let msg = msg.await.unwrap();
+            state.msg_map.lock().unwrap().insert(id, MessageType::Text(msg.id));
+        };
+        // println!("{:#?}", msg);
+    }
+}
+
+#[derive(Serialize)]
+struct GetMessageRequest {
+    message_ids: List<Vec<u64>>,
+    fields: List<Vec<String>>,
+    preview_length: usize,
+}
+
+#[derive(Serialize)]
+struct GetMessageByConvIdRequest {
+    peer_id: u64,
+    conversation_message_ids: List<Vec<u64>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct VkMessage {
+    id: u64,
+    conversation_message_id: u64,
+    text: String,
+    peer_id: u64,
+    attachments: Vec<VkAttachment>,
+}
+
+#[derive(Deserialize, Debug)]
+struct VkPhotoFile {
+    height: usize,
+    width: usize,
+    url: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct VkPhoto {
+    orig_photo: VkPhotoFile
+}
+
+#[derive(Deserialize, Debug)]
+struct VkVideo {
+    files: Value,
+    player: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct VkDocument {
+    title: String,
+    url: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct VkAudioMessage {
+    link_mp3: String,
+    link_ogg: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct VkPoll {
+    question: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PostAuthor {
+    Profile { first_name: String, last_name: String },
+    Group { name: String },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize, Debug)]
+struct VkWallPost {
+    to_id: i64,
+    id: i64,
+    from: PostAuthor,
+}
+
+#[derive(Deserialize, Debug)]
+struct VkSticker {
+    sticker_id: i64,
+    product_id: i64,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum VkAttachment {
+    Photo { photo: VkPhoto },
+    Video { video: VkVideo },
+    Doc { doc: VkDocument },
+    AudioMessage { audio_message: VkAudioMessage },
+    Poll { poll: VkPoll },
+    Wall { wall: VkWallPost },
+    Sticker { sticker: VkSticker },
+    #[serde(other)]
+    Unsupported,
+}
+
+#[derive(Deserialize)]
+struct GetMessageResponse {
+    count: usize,
+    items: Vec<VkMessage>
+}
+
+enum Attachment {
+    Photo { file: InputFile },
+    Voice { file: InputFile },
+    Video { file: InputFile },
+}
+
+async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String) {
+    let resp: GetMessageResponse = state.api.send_request("messages.getById", GetMessageRequest {
+        message_ids: List(vec![id]),
+        fields: List(vec!["name".to_string()]),
+        preview_length: 1
+    }).await.unwrap();
+    let mut attachments = vec![];
+    let mut texts = vec![];
+    for attach in resp.items.into_iter().nth(0).unwrap().attachments {
+        match attach {
+            VkAttachment::Photo { photo } => {
+                attachments.push(Attachment::Photo {
+                    file: InputFile::url(Url::parse(&photo.orig_photo.url).unwrap())
+                });
+            }
+            VkAttachment::Unsupported => {
+                texts.push("Вложение не поддерживается".to_string())
+            }
+            VkAttachment::Sticker { sticker } => {
+                attachments.push(Attachment::Photo {
+                    file: InputFile::url(Url::parse(&format!("https://vk.com/sticker/1-{}-128b", sticker.sticker_id)).unwrap()),
+                })
+            }
+            VkAttachment::Doc { doc } => {
+                texts.push(format!("[{}]({})", doc.title, doc.url))
+            }
+            VkAttachment::AudioMessage { audio_message } => {
+                attachments.push(Attachment::Voice {
+                    file: InputFile::url(Url::parse(&audio_message.link_ogg).unwrap()),
+                })
+            }
+            VkAttachment::Video { video } => {
+                if let Some(url) = video.files.get("mp4_720")
+                    .or(video.files.get("mp4_480"))
+                    .or(video.files.get("mp4_360"))
+                    .or(video.files.get("mp4_240"))
+                    .or(video.files.get("mp4_144")) {
+                    attachments.push(Attachment::Video {
+                        file: InputFile::url(Url::parse(&url.as_str().unwrap()).unwrap()),
+                    })
+                } else {
+                    texts.push(format!("[Видео]({})", video.player).to_string())
+                }
+            }
+            VkAttachment::Poll { poll } => {
+                texts.push(format!("📊 _{}_", poll.question).to_string())
+            }
+            VkAttachment::Wall { wall } => {
+                let author = match wall.from {
+                    PostAuthor::Profile { first_name, last_name } => format!("{} {}", first_name, last_name),
+                    PostAuthor::Group { name } => name,
+                    PostAuthor::Unknown => "Неизвестно".to_string(),
+                };
+                texts.push(format!("[Публикация от {}](https://vk.com/wall{}_{})", author, wall.to_id, wall.id).to_string())
+            }
+        };
+    }
+
+    let text_attach_count = texts.len();
+    let mut attachments_text: String = "🔗 *Вложения*:".to_string();
+    for attach in texts {
+        attachments_text += &format!("\n{}", attach)
+    }
+
+    let attachments_text = if text_attach_count > 0 {
+        attachments_text
+    } else {
+        "".to_string()
+    };
+
+    (attachments, attachments_text)
+}
+
+async fn edit_message(state: &State, msg: Value) {
+    let id = msg.get(1).unwrap().as_u64().unwrap();
+    let chat = msg.get(3).unwrap().as_u64().unwrap();
+    if chat < 2000000000 {
+        return;
+    }
+    let text = msg.get(5).unwrap().as_str().unwrap();
+    let from = msg.get(6).unwrap().get("from").unwrap().as_str().unwrap();
+
+    if let (Some(chat), Some(msg)) = (state.chat_map.get(&chat), state.msg_map.lock().unwrap().get(&id)) {
+        let (message, _) = format_message(state, id, from, text).await;
+        match msg {
+            MessageType::Text(id) => {
+                let _ = state.bot.edit_message_text(chat.clone(), id.clone(), message).link_preview_options(LinkPreviewOptions {
+                    is_disabled: true,
+                    url: None,
+                    prefer_small_media: false,
+                    prefer_large_media: false,
+                    show_above_text: false,
+                }).await;
+            }
+            MessageType::Caption(id) => {
+                let _ = state.bot.edit_message_caption(chat.clone(), id.clone())
+                    .caption(message).await;
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Debug)]
+struct UsersGetRequest {
+    user_ids: List<Vec<usize>>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+struct UsersGetResponse {
+    id: i64,
+    first_name: String,
+    last_name: String,
+}
+
+async fn get_sender(api: &VkApi, from: &str) -> VkApiResult<String> {
+    let id: i32 = from.parse().unwrap();
+    if id > 0 {
+        let user: Vec<UsersGetResponse> = api.send_request("users.get", UsersGetRequest {
+            user_ids: List(vec![id as usize]),
+        }).await?;
+        Ok(format!("[{} {}](https://vk.com/id{})", user[0].first_name, user[0].last_name, user[0].id))
+    } else {
+        Ok("БОТ".to_string())
+    }
+}

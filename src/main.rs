@@ -91,11 +91,15 @@ async fn handle_msg(state: &State, msg: Value) {
 
 async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (String, Vec<Attachment>) {
     let from = get_sender(&state.api, from).await.unwrap_or("???".to_string());
-    let (attachments, attach) = handle_attach(state, id).await;
-    let text = markdown_escape(text
-        .replace("<br>", "\n")
-        .replace("&gt;", ">")
-        .replace("&lt;", "<"));
+    let (attachments, attach, action) = handle_attach(state, id).await;
+    let text = if let Some(action) = action {
+        action
+    } else {
+        markdown_escape(text
+            .replace("<br>", "\n")
+            .replace("&gt;", ">")
+            .replace("&lt;", "<"))
+    };
     let msg = format!("*{}*\n{}{}\n{}", from, text, if text.len() == 0 { "" } else { "\n" }, attach);
 
     return (msg, attachments);
@@ -236,6 +240,21 @@ struct VkMessage {
     peer_id: u64,
     attachments: Vec<VkAttachment>,
     fwd_messages: Vec<VkFwdMessage>,
+    action: Option<VkMessageAction>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum VkMessageAction {
+    ChatPhotoUpdate,
+    ChatPhotoRemove,
+    ChatCreate,
+    ChatTitleUpdate,
+    ChatInviteUser,
+    ChatKickUser,
+    ChatPinMessage,
+    ChatUnpinMessage,
+    ChatInviteUserByLink
 }
 
 #[derive(Deserialize, Debug)]
@@ -341,7 +360,7 @@ enum Attachment {
     Video { file: InputFile },
 }
 
-async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String) {
+async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String, Option<String>) {
     let resp: GetMessageResponse = state.api.send_request("messages.getById", GetMessageRequest {
         message_ids: List(vec![id]),
         fields: List(vec!["name".to_string()]),
@@ -351,6 +370,19 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String) {
     let mut texts = vec![];
 
     let msg = resp.items.into_iter().nth(0).unwrap();
+    if let Some(action) = msg.action {
+        return (attachments, "".to_string(), Some(match action {
+            VkMessageAction::ChatPhotoUpdate => "_изменил\\(а\\) фотографию_",
+            VkMessageAction::ChatPhotoRemove => "_удалил\\(а\\) фотографию_",
+            VkMessageAction::ChatCreate => "_создал\\(а\\) чат_",
+            VkMessageAction::ChatTitleUpdate => "_обновил\\(а\\) название чата_",
+            VkMessageAction::ChatInviteUser => "_пригласил\\(а\\) пользователя_",
+            VkMessageAction::ChatKickUser => "_исключил\\(а\\) пользователя_",
+            VkMessageAction::ChatPinMessage => "_закрепил\\(а\\) сообщение_",
+            VkMessageAction::ChatUnpinMessage => "_открепил\\(а\\) сообщение_",
+            VkMessageAction::ChatInviteUserByLink => "_присоединился по ссылке_",
+        }.to_string()))
+    }
     for attach in &msg.attachments {
         match attach {
             VkAttachment::Photo { photo } => {
@@ -424,7 +456,7 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String) {
         "".to_string()
     };
 
-    (attachments, attachments_text)
+    (attachments, attachments_text, None)
 }
 
 async fn edit_message(state: &State, msg: Value) {

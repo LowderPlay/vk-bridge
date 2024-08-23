@@ -93,6 +93,9 @@ async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (Stri
     let from = get_sender(&state.api, from).await.unwrap_or("???".to_string());
     let (attachments, attach) = handle_attach(state, id).await;
     let text = text
+        .replace("<br>", "\n")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
         .replace("_", "\\_")
         .replace("*", "\\*")
         .replace("[", "\\[")
@@ -229,7 +232,20 @@ struct VkMessage {
     text: String,
     peer_id: u64,
     attachments: Vec<VkAttachment>,
+    fwd_messages: Vec<VkFwdMessage>,
 }
+
+#[derive(Deserialize, Debug)]
+struct VkFwdMessage {
+    id: Option<u64>,
+    conversation_message_id: u64,
+    text: String,
+    from_id: i64,
+    peer_id: Option<u64>,
+    attachments: Vec<VkAttachment>,
+    fwd_messages: Option<Vec<VkFwdMessage>>,
+}
+
 
 #[derive(Deserialize, Debug)]
 struct VkPhotoFile {
@@ -322,7 +338,9 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String) {
     }).await.unwrap();
     let mut attachments = vec![];
     let mut texts = vec![];
-    for attach in resp.items.into_iter().nth(0).unwrap().attachments {
+
+    let msg = resp.items.into_iter().nth(0).unwrap();
+    for attach in &msg.attachments {
         match attach {
             VkAttachment::Photo { photo } => {
                 attachments.push(Attachment::Photo {
@@ -362,14 +380,19 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String) {
                 texts.push(format!("📊 _{}_", poll.question).to_string())
             }
             VkAttachment::Wall { wall } => {
-                let author = match wall.from {
+                let author = match &wall.from {
                     PostAuthor::Profile { first_name, last_name } => format!("{} {}", first_name, last_name),
-                    PostAuthor::Group { name } => name,
+                    PostAuthor::Group { name } => name.to_string(),
                     PostAuthor::Unknown => "Неизвестно".to_string(),
                 };
                 texts.push(format!("[Публикация от {}](https://vk.com/wall{}_{})", author, wall.to_id, wall.id).to_string())
             }
         };
+    }
+
+    for fwd in msg.fwd_messages {
+        // TODO: add more info
+        texts.push("Пересланное сообщение".to_string());
     }
 
     let text_attach_count = texts.len();

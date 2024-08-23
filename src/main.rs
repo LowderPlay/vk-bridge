@@ -92,11 +92,17 @@ async fn handle_msg(state: &State, msg: Value) {
 async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (String, Vec<Attachment>) {
     let from = get_sender(&state.api, from).await.unwrap_or("???".to_string());
     let (attachments, attach) = handle_attach(state, id).await;
-    let text = text
+    let text = markdown_escape(text
         .replace("<br>", "\n")
         .replace("&gt;", ">")
-        .replace("&lt;", "<")
-        .replace("_", "\\_")
+        .replace("&lt;", "<"));
+    let msg = format!("*{}*\n{}{}\n{}", from, text, if text.len() == 0 { "" } else { "\n" }, attach);
+
+    return (msg, attachments);
+}
+
+fn markdown_escape(s: String) -> String {
+    s.replace("_", "\\_")
         .replace("*", "\\*")
         .replace("[", "\\[")
         .replace("]", "\\]")
@@ -113,10 +119,7 @@ async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (Stri
         .replace("{", "\\{")
         .replace("}", "\\}")
         .replace(".", "\\.")
-        .replace("!", "\\!");
-    let msg = format!("*{}*\n{}{}\n{}", from, text, if text.len() == 0 { "" } else { "\n" }, attach);
-
-    return (msg, attachments);
+        .replace("!", "\\!")
 }
 
 async fn new_message(state: &State, msg: Value) {
@@ -305,6 +308,13 @@ struct VkSticker {
 }
 
 #[derive(Deserialize, Debug)]
+struct VkLink {
+    url: String,
+    title: String,
+    caption: String,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum VkAttachment {
     Photo { photo: VkPhoto },
@@ -314,6 +324,7 @@ enum VkAttachment {
     Poll { poll: VkPoll },
     Wall { wall: VkWallPost },
     Sticker { sticker: VkSticker },
+    Link { link: VkLink },
     #[serde(other)]
     Unsupported,
 }
@@ -386,6 +397,12 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String) {
                     PostAuthor::Unknown => "Неизвестно".to_string(),
                 };
                 texts.push(format!("[Публикация от {}](https://vk.com/wall{}_{})", author, wall.to_id, wall.id).to_string())
+            }
+            VkAttachment::Link { link } => {
+                texts.push(format!("Ссылка _[{} \\| {}]({})_",
+                                   markdown_escape(link.title.to_string()),
+                                   markdown_escape(link.caption.to_string()),
+                                   link.url).to_string())
             }
         };
     }

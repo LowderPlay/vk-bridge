@@ -47,38 +47,39 @@ async fn main() -> anyhow::Result<()> {
 
     let bot = Bot::new(tg_token).parse_mode(ParseMode::MarkdownV2);
 
-    let LongPollResponse { key, server, ts } = client.send_request("messages.getLongPollServer", MessagesLongPoll {
-        lp_version: 3
-    }).await?;
-
-    let stream = client.longpoll().subscribe::<_, Value>(LongPollRequest {
-        server,
-        key,
-        ts: ts.to_string(),
-        wait: 25,
-        additional_params: json!({"mode": 2, "version": 3}),
-    });
-
     let msg_map = HashMap::<u64, MessageType>::new();
 
     let state = State {
-        api: client,
+        api: client.clone(),
         bot,
         chat_map,
         msg_map: Arc::new(Mutex::new(msg_map)),
     };
 
-    stream
-        .for_each(move |r| {
-            let state = state.clone();
-            async move {
-                if let Ok(v) = r {
-                    handle_msg(&state, v).await;
-                }
-            }
-        }).await;
+    loop {
+        let LongPollResponse { key, server, ts } = client.send_request("messages.getLongPollServer", MessagesLongPoll {
+            lp_version: 3
+        }).await?;
 
-    Ok(())
+        let stream = client.longpoll().subscribe::<_, Value>(LongPollRequest {
+            server,
+            key,
+            ts: ts.to_string(),
+            wait: 25,
+            additional_params: json!({"mode": 2, "version": 3}),
+        });
+
+        let state = state.clone();
+        stream
+            .for_each(move |r| {
+                let state = state.clone();
+                async move {
+                    if let Ok(v) = r {
+                        handle_msg(&state, v).await;
+                    }
+                }
+            }).await;
+    }
 }
 
 async fn handle_msg(state: &State, msg: Value) {

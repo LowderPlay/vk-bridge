@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::format;
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use vkclient::{List, Version, VkApi, VkApiResult};
@@ -96,10 +97,7 @@ async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (Stri
     let text = if let Some(action) = action {
         action
     } else {
-        markdown_escape(text
-            .replace("<br>", "\n")
-            .replace("&gt;", ">")
-            .replace("&lt;", "<"))
+        markdown_escape(text.to_string())
     };
     let msg = format!("*{}*\n{}{}\n{}", from, text, if text.len() == 0 { "" } else { "\n" }, attach);
 
@@ -107,7 +105,10 @@ async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (Stri
 }
 
 fn markdown_escape(s: String) -> String {
-    s.replace("_", "\\_")
+    s.replace("<br>", "\n")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("_", "\\_")
         .replace("*", "\\*")
         .replace("[", "\\[")
         .replace("]", "\\]")
@@ -442,7 +443,11 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String, Opti
 
     for fwd in msg.fwd_messages {
         // TODO: add more info
-        texts.push("Пересланное сообщение".to_string());
+        let sender = get_sender(&state.api, &fwd.from_id.to_string()).await.unwrap_or("???".to_string());
+        texts.push(format!("Пересланное сообщение от {}\n>{}||", sender, markdown_escape(fwd.text)
+            .split("\n")
+            .collect::<Vec<_>>()
+            .join("\n>")).to_string());
     }
 
     let text_attach_count = texts.len();
@@ -508,7 +513,9 @@ async fn get_sender(api: &VkApi, from: &str) -> VkApiResult<String> {
         let user: Vec<UsersGetResponse> = api.send_request("users.get", UsersGetRequest {
             user_ids: List(vec![id as usize]),
         }).await?;
-        Ok(format!("[{} {}](https://vk.com/id{})", user[0].first_name, user[0].last_name, user[0].id))
+        let user = user.into_iter().nth(0).unwrap();
+        Ok(format!("[{} {}](https://vk.com/id{})", markdown_escape(user.first_name),
+                   markdown_escape(user.last_name), user.id))
     } else {
         Ok("БОТ".to_string())
     }

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt::format;
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use vkclient::{List, Version, VkApi, VkApiResult};
@@ -105,9 +104,7 @@ async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (Stri
 }
 
 fn markdown_escape(s: String) -> String {
-    s.replace("<br>", "\n")
-        .replace("&gt;", ">")
-        .replace("&lt;", "<")
+    html_escape::decode_html_entities(&s.replace("<br>", "\n"))
         .replace("_", "\\_")
         .replace("*", "\\*")
         .replace("[", "\\[")

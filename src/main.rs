@@ -290,6 +290,13 @@ struct VkVideo {
 struct VkDocument {
     title: String,
     url: String,
+    ext: Option<String>,
+    preview: Option<VkDocumentPreview>
+}
+
+#[derive(Deserialize, Debug)]
+struct VkDocumentPreview {
+    video: Option<Value>
 }
 
 #[derive(Deserialize, Debug)]
@@ -398,7 +405,13 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String, Opti
                 })
             }
             VkAttachment::Doc { doc } => {
-                texts.push(format!("[{}]({})", doc.title, doc.url))
+                if let Some(VkDocumentPreview { video: Some(video) }) = &doc.preview {
+                    attachments.push(Attachment::Video {
+                        file: InputFile::url(Url::parse(&video.get("src").unwrap()
+                            .as_str().unwrap()).unwrap()),
+                    })
+                }
+                texts.push(format!("[{}]({})", markdown_escape(doc.title.to_string()), doc.url))
             }
             VkAttachment::AudioMessage { audio_message } => {
                 attachments.push(Attachment::Voice {
@@ -419,7 +432,7 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String, Opti
                 }
             }
             VkAttachment::Poll { poll } => {
-                texts.push(format!("📊 _{}_", poll.question).to_string())
+                texts.push(format!("📊 _{}_", markdown_escape(poll.question.to_string())).to_string())
             }
             VkAttachment::Wall { wall } => {
                 let author = match &wall.from {
@@ -427,7 +440,7 @@ async fn handle_attach(state: &State, id: u64) -> (Vec<Attachment>, String, Opti
                     PostAuthor::Group { name } => name.to_string(),
                     PostAuthor::Unknown => "Неизвестно".to_string(),
                 };
-                texts.push(format!("[Публикация от {}](https://vk.com/wall{}_{})", author, wall.to_id, wall.id).to_string())
+                texts.push(format!("[Публикация от {}](https://vk.com/wall{}_{})", markdown_escape(author), wall.to_id, wall.id).to_string())
             }
             VkAttachment::Link { link } => {
                 texts.push(format!("Ссылка _[{} \\| {}]({})_",

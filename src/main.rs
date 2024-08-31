@@ -104,7 +104,8 @@ async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (Stri
 }
 
 fn markdown_escape(s: String) -> String {
-    html_escape::decode_html_entities(&s.replace("<br>", "\n"))
+    html_escape::decode_html_entities(&s.replace("\\", "\\\\")
+        .replace("<br>", "\n"))
         .replace("_", "\\_")
         .replace("*", "\\*")
         .replace("[", "\\[")

@@ -10,6 +10,7 @@ use teloxide::Bot;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, InputMedia, InputMediaAudio, InputMediaPhoto, InputMediaVideo, LinkPreviewOptions, MessageId, ParseMode, Recipient, ReplyParameters};
 use url::Url;
+use regex::{Captures, Regex};
 
 #[derive(Serialize)]
 struct MessagesLongPoll {
@@ -96,7 +97,19 @@ async fn format_message(state: &State, id: u64, from: &str, text: &str) -> (Stri
     let text = if let Some(action) = action {
         action
     } else {
-        markdown_escape(text.to_string())
+        let re = Regex::new("\\[(id\\d+|club\\d+)\\|(.+)]").unwrap();
+        let mut mentions = vec![];
+        let text = re.replace_all(&text, |groups: &Captures| {
+            mentions.push(format!("[{}](https://vk.com/{})",
+                                  groups.get(2).unwrap().as_str(),
+                                  groups.get(1).unwrap().as_str()));
+            "\x01"
+        }).to_string();
+        let mut text = markdown_escape(text.to_string());
+        for mention in mentions {
+            text = text.replacen("\x01", &mention, 1);
+        }
+        text
     };
     let msg = format!("*{}*\n{}{}\n{}", from, text, if text.len() == 0 { "" } else { "\n" }, attach);
 

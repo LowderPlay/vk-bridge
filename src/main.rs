@@ -332,11 +332,18 @@ enum PostAuthor {
     #[serde(other)]
     Unknown,
 }
+impl Default for PostAuthor {
+    fn default() -> Self {
+        PostAuthor::Unknown
+    }
+}
+
 
 #[derive(Deserialize, Debug)]
 struct VkWallPost {
     to_id: i64,
     id: i64,
+    #[serde(default = "PostAuthor::default")]
     from: PostAuthor,
 }
 

@@ -1,4 +1,4 @@
-FROM rust:1.80 as builder
+FROM rust:1.82 as builder
 WORKDIR /usr/src/vkbridge
 COPY . .
 RUN cargo install --path .

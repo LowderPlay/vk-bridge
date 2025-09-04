@@ -44,7 +44,9 @@ async fn main() -> anyhow::Result<()> {
     let mut chat_map: HashMap<u64, Recipient> = serde_json::from_str(&std::fs::read_to_string("chats.json")?)?;
     println!("{:#?}", chat_map);
 
-    let client: VkApi = vkclient::VkApiBuilder::new(vk_token.to_string()).with_version(Version(5, 199)).into();
+    let client: VkApi = vkclient::VkApiBuilder::new(vk_token.to_string())
+        .with_domain("api.vk.ru".to_string())
+        .with_version(Version(5, 199)).into();
 
     let bot = Bot::new(tg_token).parse_mode(ParseMode::MarkdownV2);
 
